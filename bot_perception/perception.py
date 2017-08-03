@@ -2,7 +2,6 @@ import numpy as np
 import cv2
 import matplotlib.image as mpimg
 
-
 # Identify pixels above the threshold
 # Threshold of RGB > 160 does a nice job of identifying ground pixels only
 def color_thresh_road(img, rgb_thresh=(160, 160, 160)):
@@ -11,12 +10,12 @@ def color_thresh_road(img, rgb_thresh=(160, 160, 160)):
 	# Index the array of zeros with the boolean array and set to 1
 
 
-	lower_road = np.array([90,100,100])
-	upper_road = np.array([140,150,130])
+	lower_road = np.array([0,0,200])
+	upper_road = np.array([100,100,255])
 	color_db = [[lower_road, upper_road]]
 	hsv = cv2.cvtColor(img, cv2.COLOR_RGB2HSV)
 	mask = cv2.inRange(hsv,color_db[0][0], color_db[0][1])
-	closing_kenel_size = 3
+	closing_kenel_size = 5
 	closing_kernel = np.ones((closing_kenel_size,closing_kenel_size),np.uint8)
 	color_select = cv2.morphologyEx(mask,cv2.MORPH_CLOSE,closing_kernel)
 
@@ -24,19 +23,15 @@ def color_thresh_road(img, rgb_thresh=(160, 160, 160)):
 	return color_select
 
 def color_thresh_obstacles(img, rgb_thresh=(160, 160, 160)):
-	# Create an array of zeros same xy size as img, but single channel
-	color_select = np.zeros_like(img[:,:,0])
-	# Require that each pixel be above all three threshold values in RGB
-	# above_thresh will now contain a boolean array with "True"
-	# where threshold was met
-	above_thresh = (img[:,:,0] > rgb_thresh[0]) \
-	            | (img[:,:,1] > rgb_thresh[1]) \
-	            | (img[:,:,2] > rgb_thresh[2])
-	# Index the array of zeros with the boolean array and set to 1
-	color_select[above_thresh] = 1
-	closing_kenel_size = 2
+	lower_road = np.array([0,80,0])
+	upper_road = np.array([50,255,100])
+	color_db = [[lower_road, upper_road]]
+	hsv = cv2.cvtColor(img, cv2.COLOR_RGB2HSV)
+	mask = cv2.inRange(hsv,color_db[0][0], color_db[0][1])
+	closing_kenel_size = 6
 	closing_kernel = np.ones((closing_kenel_size,closing_kenel_size),np.uint8)
-	color_select = cv2.morphologyEx(color_select,cv2.MORPH_CLOSE,closing_kernel)
+	color_select = cv2.morphologyEx(mask,cv2.MORPH_CLOSE,closing_kernel)
+
 	# Return the binary image
 	return color_select
 
@@ -123,8 +118,16 @@ def perception_step(botview):
 	# 1) Define source and destination points for perspective transform
 
 	#initialized in driver_rover.py
+
+	view_road = color_thresh_road(botview.img)
+	view_obstacles = color_thresh_obstacles(botview.img)
+	view_parking = color_thresh_parking(botview.img)
+	botview.img_view_threshold[:,:,1] = view_road*255
+	botview.img_view_threshold[:,:,2] = view_obstacles*255
+	botview.img_view_threshold[:,:,0] = view_parking*255
 	# 2) Apply perspective transform
 	warped,_ = perspect_transform(botview.img, botview.M)
+#	botview.img_view_threshold = warped
 	# 3) Apply color threshold to identify navigable terrain/obstacles/rock samples
 	road = color_thresh_road(warped)
 	obstacles = color_thresh_obstacles(warped)
@@ -142,15 +145,13 @@ def perception_step(botview):
 
 
 	# 6) Convert rover-centric pixel values to world coordinates
-	scale = 10/0.21#2*botview.dst_size
 	world_size = botview.worldmap.shape[0]
 	xpos = botview.x
 	ypos = botview.y
 	yaw = botview.theta#botview.yaw
-
-	road_x_world, road_y_world = pix_to_world(xpix_road, ypix_road, xpos, ypos, yaw, world_size, scale)
-	obstacle_x_world, obstacle_y_world = pix_to_world(xpix_obstacles, ypix_obstacles, xpos, ypos, yaw, world_size, scale)
-	parking_x_world, parking_y_world = pix_to_world(xpix_parking, ypix_parking, xpos, ypos, yaw, world_size, scale)
+	road_x_world, road_y_world = pix_to_world(xpix_road, ypix_road, xpos, ypos, yaw, world_size, botview.scale)
+	obstacle_x_world, obstacle_y_world = pix_to_world(xpix_obstacles, ypix_obstacles, xpos, ypos, yaw, world_size, botview.scale)
+	parking_x_world, parking_y_world = pix_to_world(xpix_parking, ypix_parking, xpos, ypos, yaw, world_size, botview.scale)
 
 
 	# 7) Update Rover worldmap (to be displayed on right side of screen)
@@ -162,19 +163,36 @@ def perception_step(botview):
 	#     xpix_rocks, ypix_rocks = rover_coords(rocks)
 	#     rock_x_world, rock_y_world = pix_to_world(xpix_rocks, ypix_rocks, xpos, ypos, yaw, world_size, scale)
 	#     Rover.worldmap[rock_y_world, rock_x_world, 1] = 255 
-	botview.worldmap[road_y_world, road_x_world, 2] += 10
-	botview.worldmap[obstacle_y_world, obstacle_x_world, 0] += 1 
+	botview.worldmap[road_y_world, road_x_world, 2] =255#+= 10
+	botview.worldmap[obstacle_y_world, obstacle_x_world, 0] =255#+= 1 
 	nav_map = botview.worldmap[:,:,2] > 0
 	botview.worldmap[nav_map,0] = 0
+
+
 	# 8) Convert rover-centric pixel positions to polar coordinates
 	# Update Rover pixel distances and angles
 	# Calculate pixel values in rover-centric coords and distance/angle to all pixels
 	
-	dist, angles = to_polar_coords(xpix_road, ypix_road)
-	mean_dir = np.mean(angles)
-	botview.nav_dists = dist
-	botview.nav_angles = angles
-	index_pix = (xpix<10) & (xpix>-10)
-	dist_select, angles_select = to_polar_coords(xpix[index_pix], ypix[index_pix])
+#	dist1, angles1 = to_polar_coords(xpix_road, ypix_road)
+
+
+	index_pix_xlimit = xpix_road<(0.2*botview.scale) #2 m y #################
+	dist, angles = to_polar_coords(xpix_road[index_pix_xlimit], ypix_road[index_pix_xlimit])
+#	print "Length of angles:",len(angles1),len(angles),0.3*botview.scale,max(ypix_road),max(xpix_road),".\n"
+	if len(angles) == 0:
+		botview.nav_dists = 0
+		botview.nav_angles = 0
+	else:
+		mean_dir = np.mean(angles)
+		mean_dist = np.mean(dist)
+		botview.nav_dists = 0.2#mean_dist
+		botview.nav_angles = mean_dir
+		#print mean_dir
+		#print "max and min:",np.max(dist),np.min(dist),mean_dist
+	index_pix = (xpix_road<10) & (xpix_road>-10)
+	dist_select, angles_select = to_polar_coords(xpix_road[index_pix], ypix_road[index_pix])
 	botview.stop_front_thresh = len(dist_select)
+	# if botview.stop_front_thresh < 5:
+	# 	botview.nav_dists = 0
+	# 	botview.nav_angles = 0		
 	return botview

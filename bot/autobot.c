@@ -50,13 +50,17 @@ need to do:
 #define ENCODER_RATIO (PI*D)/(GEARBOX*ENCODER_RES)
 
 //path
-#define ERR_TOL_DIST 0.05
-#define ERR_TOL_THETA 0.05
+#define ERR_TOL_DIST 0.09//0.02//0.09
+#define ERR_TOL_THETA 0.05//0.02//0.05
+
+//odometry
+#define ODOM_GYRO_THRESHOLD 0.000023
+#define BOT_MOTION_TURN_THRESHOLD 8 /////////////////
 
 //GPS UART configuration
 #define GPS_BUF_SIZE 	64
 #define TIMEOUT_S 	1.5
-#define BAUDRATE 	9600//115200
+#define BAUDRATE 	9600
 #define GPS_BUS 5
 
 char gps_buf[GPS_BUF_SIZE]; 
@@ -74,7 +78,6 @@ int rotate_count = 0;
 //test
 float target_x = 0;
 float target_y = 0;
-float target_theta2 = 0;
 float target_err = 0;
 
 
@@ -190,9 +193,9 @@ bot_data_t bot_data = {
 };
 //******************************tune
 PID pathPID = {
-	.kp = 4,
+	.kp = 3,//4
 	.ki = 0,
-	.kd = 1 * (0.01),
+	.kd = 0.03,//0.01
 	.last_err = 0,
 	.accumulate = 0,
 };
@@ -382,19 +385,18 @@ int main(){
 *******************************************************************************/
 
 void robot_path_handler(const lcm_recv_buf_t *rbuf, const char * channel, const robot_path_t * msg, void * user){
-
-/*	if(bot_motion_state != IDLE)
+/*
+	if(bot_motion_state != IDLE)
 		return;*/
 	int i;
 	//printf("Receive LCM msg from channel CONTROLLER_PATH.\n");
 	for(i=0;i<msg->path_length;i++){
-		printf("\nPoint index No.: %d, x: %6.2f, y: %6.2f\n", (i+1), msg->path[i].x, msg->path[i].y);
+		printf("\nPoint index No.: %d, x: %6.3f, y: %6.3f\n", i, msg->path[i].x, msg->path[i].y);
 	}
 	path_list = robot_path_t_copy(msg);// copy const robot_path_t * msg to global pointer path_list
-	if(msg->path_length < 2)
-		return;
-/*	path_list->path[0].x = world_odom.x;
-	path_list->path[0].y = world_odom.y;*/
+/*	if(msg->path_length < 2)
+		return;*/
+
 	path_list_origin[0] = world_odom.x;
 	path_list_origin[1] = world_odom.y;
 	bot_motion_state = RUN;// set up state of bot motion, enum bot_motion_state_t
@@ -452,7 +454,14 @@ int set_motor_speed(motor_t* motor, float speed){
 	// Adjust motor speed via PWM and direction via the dir pins
 	// SV1, SV3: are the actual pin locations on the board correspond to
 	//           A0, A1. 
-	if(speed > 0){
+	if(speed >= 0){
+		rc_gpio_set_value_mmap(motor->dir_1, LOW);
+		rc_gpio_set_value_mmap(motor->dir_2, HIGH);
+	}else if(speed < 0){
+		rc_gpio_set_value_mmap(motor->dir_1, HIGH);
+		rc_gpio_set_value_mmap(motor->dir_2, LOW);		
+	}
+/*	if(speed > 0){
 		rc_gpio_set_value_mmap(motor->dir_1, LOW);
 		rc_gpio_set_value_mmap(motor->dir_2, HIGH);
 	}else if(speed < 0){
@@ -461,7 +470,7 @@ int set_motor_speed(motor_t* motor, float speed){
 	}else{
 		rc_gpio_set_value_mmap(motor->dir_1, LOW);
 		rc_gpio_set_value_mmap(motor->dir_2, LOW);		
-	}
+	}*/
 
 	rc_pwm_set_duty_mmap(motor->pwm_num, motor->pwm_chan, fabs(speed));
 	return 1;
@@ -570,13 +579,13 @@ void* printf_loop(void* ptr){
 														imu_data.dmp_quat[QUAT_Z]);
 */
 			// print TaitBryan angles
-			printf("%6.2f %6.2f %6.2f |",	bot_data.roll,bot_data.pitch,bot_data.yaw);
+			printf("%6.2f %6.2f %6.4f |",	bot_data.roll,bot_data.pitch,bot_data.yaw);
 			printf(" %5.2f %5.2f %5.2f |",	bot_data.accel_x,bot_data.accel_y,bot_data.accel_z);
 			printf(" %5.1f %5.1f %5.1f |",	bot_data.gyro_x,bot_data.gyro_y,bot_data.gyro_z);
 			
 			//printf("target_x %5.3f target_y %5.3f pose_x %5.3f pose_y %5.3f error: %5.3f|",	target_x,target_y,pose_xyz.x,pose_xyz.y,target_err);
-			printf("pose_x %5.3f pose_y %5.3f theta %5.3f theta_err:%5.3f|",world_odom.x,world_odom.y, world_odom.theta,target_theta2);
-			
+			printf("pose_x %5.3f pose_y %5.3f theta %5.4f|",world_odom.x,world_odom.y, world_odom.theta);
+			printf("gyro %f encoder %f|",bot_data.delta_theta_gyro,bot_data.delta_theta_encoder);
 /*			printf("%5.3f |", bot_data.imu_temp);
 			printf("%6.2fC |", bot_data.temp);
 			printf("%7.2fkpa |", bot_data.pressure/1000.0);
@@ -611,9 +620,9 @@ void cascade_control(){
 		odometry_get(1);		
 	}
 	control_count += 1;
-	if(control_count == 4){
+	if(control_count == 1){
 		//RC_Control(15);
-		bot_motion_control(4);
+		bot_motion_control(1);
 		control_count = 0;
 	}
 
@@ -654,53 +663,61 @@ void bot_motion_control(int freq_div){
 	float err_dist = sqrt((cx - wx)*(cx - wx)   + (cy - wy)*(cy - wy));
 	
 	if(err_dist < ERR_TOL_DIST ){
+		//printf("\nerr_dist < ERR_TOL_DIST.\n");
 		//if(fabs(bot_data.fb_forward_vel) < 0.03){
 		rotate_count += 1;
 		if(rotate_count == 5){
 			rotate_count = 0;
-			bot_motion_state = TURN;//consider target point arrived
 			path_idx += 1;
-			//printf("Turn.\n");
+			printf("\nPoint %d [%f,%f] end.\n",(path_idx-1),path_list->path[path_idx-1].x,path_list->path[path_idx-1].y);
+			printf("\nDistance error is %f.\n",err_dist);
+			printf("\npath ifx %d path_list->path_length %d.\n",path_idx,path_list->path_length);
+			//bot_motion_state = TURN;
+/*			float theta_temp = atan2(path_list->path[path_idx].y - world_odom.y, path_list->path[path_idx].x - world_odom.x) - world_odom.theta;
+			if (fabs(theta_temp)>BOT_MOTION_TURN_THRESHOLD){
+				printf("\ntheta_temp:%d,%f,%f\n",path_idx, atan2(path_list->path[path_idx].y - world_odom.y, path_list->path[path_idx].x),world_odom.theta);
+				printf("\ntheta_temp:%f\n",theta_temp);
+				printf("\nStart turn. \n");
+				bot_motion_state = TURN;//consider target point arrived
+			}*/
+			if(path_idx >= path_list->path_length){
+				bot_motion_state = IDLE;
+				set_motor_speed(&motor_1,0);
+				set_motor_speed(&motor_2,0);
+				bot_data.set_forward_vel = 0;
+				bot_data.set_angular_vel = 0;
+				pathPID.last_err = 0;
+				pathPID.accumulate = 0;
+				printf("\nIDLE\n");
+				return;
+			}
+			else{
+				printf("\nPoint %d [%f,%f] begins.\n",path_idx,path_list->path[path_idx].x,path_list->path[path_idx].y);
+			}
 		}
-
 		//}
-		bot_data.set_forward_vel = 0;
-		bot_data.set_angular_vel = 0;
-		pathPID.last_err = 0;
-		pathPID.accumulate = 0;
-		
-		if(path_idx >= path_list->path_length){
-			bot_motion_state = IDLE;
-			set_motor_speed(&motor_1,0);
-			set_motor_speed(&motor_2,0);
-			return;
-		}
 	}
 	//run the robot to desired pos and direction
 	else{
-		//when receive a new command target point, first make sure the robot is on the correct direction?
-		//pure turn, no heading
-		if( bot_motion_state == TURN){
+
+/*		if( bot_motion_state == TURN){
+			printf("\nturn\n");
 			// printf(" start turn : wx:%6.2f  \n",wx);
 			bot_data.set_forward_vel = 0;
 			float theta_err = heading_pose_botgui(path_list->path[path_idx], world_odom);//cur_path->path[path_idx].theta;
-target_theta2 = theta_err;
 			if(fabs(theta_err) < ERR_TOL_THETA){
 				bot_data.set_angular_vel = 0;
-				printf(" *****************************finish Turn : path_idx:%d  \n",path_idx);
-
+				printf(" \n***finish Turn : path_idx:%d  \n",path_idx);
 				bot_motion_state = RUN;
 			}
 			else{
-				bot_data.set_angular_vel = theta_err<0 ? -3:-3;//4 : 4;for odom//1:1 for bot caster
+				bot_data.set_angular_vel = theta_err<0 ? -3.5:-3.5;//4 : 4;for odom//1:1 for bot caster
 			}
-		}
+		}*/
 		if( bot_motion_state == RUN){
 			//the velocity can be otherwise calculated by defining a velocity profile
 			
-			//bot_data.set_forward_vel = path_vel_control(err_dist,0.2,0.1,0.02);//float path_vel_control(float err_dist, float ref_vel, float dist_cut, float delta_vel)
-			//bot_data.set_forward_vel = path_vel_control(err_dist,0.2,0.1,0.02);//0.02
-			bot_data.set_forward_vel = 0.3;
+			bot_data.set_forward_vel = 0.25;
 			//calculate if the robot is right on the path
 			float px,py;
 			if(path_idx == 0){
@@ -764,24 +781,27 @@ void odometry_get(int freq_div){
 	bot_data.fb_wheel_vel_1 = d_1 * sample_odom_Hz;
 	bot_data.fb_wheel_vel_2 = d_2 * sample_odom_Hz;
 
-    //bot_state.delta_theta = delta_theta;
+	//bot_state.delta_theta = delta_theta;
 
-    float delta_theta_gyro = theta_regulate(theta_regulate(bot_data.yaw) - bot_data.prev_yaw);// notice:delta_theta and delta_theta_gyro have different signal
-    bot_data.prev_yaw = theta_regulate(bot_data.yaw);
+	float delta_theta_gyro = theta_regulate(theta_regulate(bot_data.yaw) - bot_data.prev_yaw);// notice:delta_theta and delta_theta_gyro have different signal
+	bot_data.prev_yaw = theta_regulate(bot_data.yaw);
 
-    bot_data.delta_theta_gyro = rc_march_filter(&delta_theta_gyro_filter, delta_theta_gyro);
-    bot_data.delta_theta_encoder = rc_march_filter(&delta_theta_odom_filter, delta_theta_encoder);
+	bot_data.delta_theta_gyro = rc_march_filter(&delta_theta_gyro_filter, delta_theta_gyro);
+	bot_data.delta_theta_encoder = rc_march_filter(&delta_theta_odom_filter, delta_theta_encoder);
 
-/*	float diff_gyro_odom = theta_regulate(theta_regulate(bot_state.delta_theta_gyro) + theta_regulate(bot_state.delta_theta));
-	if (fabs(diff_gyro_odom) > ODOM_GYRO_THRESHOLD && fabs(diff_gyro_odom) < ODOM_GYRO_THRESHOLD_max)
+//	printf("delta gyro %f, encoder %f\n",bot_data.delta_theta_gyro,bot_data.delta_theta_encoder);
+
+/*	float diff_gyro_odom = theta_regulate(theta_regulate(bot_data.delta_theta_gyro) - theta_regulate(bot_data.delta_theta));
+*/	if (fabs(theta_regulate(theta_regulate(bot_data.delta_theta_gyro) - theta_regulate(bot_data.delta_theta_encoder))) > ODOM_GYRO_THRESHOLD)
 		world_odom.theta = theta_regulate(world_odom.theta + bot_data.delta_theta_gyro);
 	else
 		world_odom.theta = theta_regulate(world_odom.theta + bot_data.delta_theta_encoder);
-*/
+
 
 
     // pure gyro
-	world_odom.theta = theta_regulate(world_odom.theta + bot_data.delta_theta_gyro);//original
+/*	world_odom.theta = theta_regulate(world_odom.theta + bot_data.delta_theta_gyro);//original
+*/
 /*	// pure encoder
 	world_odom.theta = theta_regulate(world_odom.theta + bot_data.delta_theta_encoder);*/
 
